@@ -47,7 +47,7 @@ import {
   Move, Plus, Save, PenTool, Trash2, Edit3
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, setPersistence, browserSessionPersistence, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from 'firebase/auth';
+import { getAuth, setPersistence, browserSessionPersistence, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut, GoogleAuthProvider, linkWithPopup } from 'firebase/auth';
 import { getFirestore, doc, setDoc, onSnapshot, runTransaction, collection, getDoc, getDocs, getDocsFromServer, getDocFromServer, query, orderBy, limit, startAfter, deleteDoc } from 'firebase/firestore';
 
 import { getMessaging, getToken, onMessage, isSupported as isMessagingSupported } from 'firebase/messaging';
@@ -217,6 +217,34 @@ const escapeHtml = (value) => String(value ?? '')
   .replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;')
   .replace(/'/g, '&#039;');
+
+// v2 yeni kayıtlar için kriptografik cihaz sırrı: eski sgm_device_id'yi değiştirme.
+// Bu anahtar cihaz donanım kimliği değil, bu tarayıcı kurulumunu tanır.
+const DEVICE_BINDING_STORAGE_KEY = 'sgm_device_binding_secret_v2';
+const getDeviceBindingSecret = (create = false) => {
+  let secret = localStorage.getItem(DEVICE_BINDING_STORAGE_KEY);
+  if (!secret && create) {
+    if (!crypto?.getRandomValues) throw new Error('Güvenli cihaz anahtarı üretilemedi. HTTPS adresini kullanın.');
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    secret = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    localStorage.setItem(DEVICE_BINDING_STORAGE_KEY, secret);
+  }
+  return typeof secret === 'string' && /^[a-f0-9]{64}$/.test(secret) ? secret : '';
+};
+const newRegistrationGuardEnabled = import.meta.env?.VITE_SGM_NEW_REGISTRATION_GUARD_ENABLED === 'true';
+// Yalnızca yeni kayıt ekranına girişte istemciye erken uyarı verir. Gerçek
+// ikinci-kayıt engeli sunucudaki atomik sgmDeviceBindings kontrolüdür.
+const REGISTRATION_BROWSER_LOCK_KEY = 'sgm_registration_device_lock_v1';
+const getRegistrationBrowserLock = () => {
+  try {
+    const savedLock = JSON.parse(localStorage.getItem(REGISTRATION_BROWSER_LOCK_KEY) || 'null');
+    if (typeof savedLock?.userId === 'string' && savedLock.userId) return savedLock;
+    // Önceki sürümde kayıt olanların bu tarayıcıdaki eski işareti de korunur.
+    const old = JSON.parse(localStorage.getItem('sgm_registration_account') || 'null');
+    if (typeof old?.userId === 'string' && old.userId) return { userId: old.userId };
+  } catch { /* Depolama kapalıysa sunucu kontrolü yine geçerlidir. */ }
+  return null;
+};
 
 const getDeviceId = () => {
   let did = localStorage.getItem('sgm_device_id');
@@ -2003,7 +2031,7 @@ function MainApp() {
   const runStudentDeskAction = async (action, input = {}) => {
     if (!fbUser) throw new Error('Öğrenci oturumu bulunamadı. Tekrar giriş yapın.');
     return requestStudentDesk({
-      action, input, getToken: forceRefresh => fbUser.getIdToken(forceRefresh)
+      action, input:{...input,deviceSecret:getDeviceBindingSecret()}, getToken: forceRefresh => fbUser.getIdToken(forceRefresh)
     });
   };
   const runAdminMaintenance = async (action, input = {}) => {
@@ -2037,7 +2065,7 @@ function MainApp() {
     const response = await fetch('/api/student-activity', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
-      body: JSON.stringify({ action, ...input })
+      body: JSON.stringify({ action, ...input, deviceSecret:getDeviceBindingSecret() })
     });
     const payload = await response.json().catch(() => null);
     if (!response.ok || payload?.ok !== true) {
@@ -4651,12 +4679,15 @@ function MainApp() {
 
   const prepareNewStudentRegistration = () => {
     if (registrationInFlightRef.current) return;
-    // Yalnızca bu cihazın kayıt ekranı temizlenir; önceki hesap sunucuda korunur.
-    localStorage.removeItem('sgm_registration_account');
-    ['sgm_registration_token', 'sgm_registration_credentials', 'sgm_registration_form_url', 'sgm_registration_form_opened'].forEach(key => sessionStorage.removeItem(key));
-    sessionStorage.setItem('sgm_registration_new_person', '1');
-    setRegistrationPending(''); setRegistrationResult(null); setRegistrationFormUrl('');
-    setRegistrationFormOpened(false); setRegistrationError('');
+    if (getRegistrationBrowserLock()) {
+      sessionStorage.removeItem('sgm_registration_new_person');
+      showMessage('Bu Cihazda Kayıt Var',
+        'Bu tarayıcıda daha önce GM Özel Kod oluşturuldu. İkinci hesap açamazsınız. Mevcut GM Özel Kod ve şifrenizle giriş yapın; bilgilerinizi kaybettiyseniz gençlik liderine başvurun.', 'warning');
+      return;
+    }
+    // Kayıtlı hesabın işaretini silip ikinci kullanıcı açma yolu artık yok.
+    sessionStorage.removeItem('sgm_registration_new_person');
+    setRegistrationError('');
     setRegistrationAccepted(false); setRegistrationRulesOpen(true); setShowRules(true);
   };
 
@@ -4665,6 +4696,11 @@ function MainApp() {
     registrationInFlightRef.current = true;
     setRegistrationBusy(true); setRegistrationError('');
     try {
+      // Kurallar penceresi başka sekmeden/açık eski sekmeden gelse de yeniden
+      // hesap üretme. İlk kayıt tamamlanmışsa yalnızca girişe izin ver.
+      if (getRegistrationBrowserLock()) {
+        throw new Error('Bu tarayıcıda daha önce GM Özel Kod oluşturulmuş. Tekrar hesap açamazsınız. Mevcut kod ve şifrenizle giriş yapın.');
+      }
       if (!isDataLoaded) throw new Error('Sistem verileri yüklenene kadar bekleyin.');
       if (db && auth) {
         await ensureTabAuthPersistence();
@@ -4691,7 +4727,9 @@ function MainApp() {
         if (!auth) throw new Error('Firebase oturumu başlatılamadı.');
         // Silinmiş öğrenci tokenı kayıt API'sine gönderilmez. Doğrulanmış anonim
         // oturum oluşturulur; istemci yeni hesabın kimliğini kendisi seçmez.
-        if (registrationAuthUser && (newPerson || !registrationAuthUser.isAnonymous ||
+        if (registrationAuthUser && (newPerson ||
+            (!registrationAuthUser.isAnonymous &&
+             !(newRegistrationGuardEnabled && registrationAuthUser.providerData?.some(p => p.providerId === 'google.com'))) ||
             serverDeletedUserIdsRef.current.has(String(registrationAuthUser.uid)) ||
             isRecordDeleted('users', registrationAuthUser.uid))) {
           await signOut(auth);
@@ -4699,6 +4737,16 @@ function MainApp() {
           setCurrentUser(null); setSelectedDeskId(null); setDeskSelectionDeadline(null);
         }
         if (!registrationAuthUser) registrationAuthUser = (await signInTabAnonymously()).user;
+        if (newRegistrationGuardEnabled && registrationAuthUser.isAnonymous &&
+            !(saved?.userId === registrationAuthUser.uid && !newPerson)) {
+          // Link ile UID korunur. Google hesabı başka Firebase kullanıcıya bağlıysa
+          // link hata verir, yeni GM kodu oluşturulmaz.
+          const provider = new GoogleAuthProvider();
+          provider.setCustomParameters({prompt:'select_account'});
+          const linked = await linkWithPopup(registrationAuthUser, provider);
+          registrationAuthUser = linked.user;
+          if (!registrationAuthUser.emailVerified) throw new Error('Google e-posta adresi doğrulanamadı.');
+        }
         // İstek kaybolursa tekrar aynı yeni oturum kullanılır; ikinci hesap açılmaz.
         sessionStorage.removeItem('sgm_registration_new_person');
         verifiedAdminUidRef.current = null;
@@ -4727,11 +4775,14 @@ function MainApp() {
             // Aynı doğrulanmış anonim UID kullanılır; 401'de yetki atlanmaz.
             const tokenResult = await registrationAuthUser.getIdTokenResult(true);
             if (auth.currentUser?.uid !== registrationAuthUser.uid) throw new Error('Kayıt sırasında oturum değişti. Kayıt ekranından tekrar deneyin.');
-            if (tokenResult.claims.firebase?.sign_in_provider !== 'anonymous') throw new Error('Anonim kayıt oturumu doğrulanamadı. Kayıt ekranını yeniden açıp tekrar deneyin.');
+            // Sunucu, yeni kayıt için Google doğrulamasını; eski UID için ise
+            // yalnızca zaten var olan hesabı kontrol eder.
+            const provider = tokenResult.claims.firebase?.sign_in_provider;
+            if (provider !== 'anonymous' && provider !== 'google.com') throw new Error('Kayıt oturumu doğrulanamadı.');
             response = await fetch('/api/student-register', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenResult.token}` },
-              body: JSON.stringify({})
+              body: JSON.stringify({deviceSecret:getDeviceBindingSecret(true)})
             });
             payload = await response.json().catch(() => null);
             if (response.status !== 401) break;
@@ -4751,6 +4802,7 @@ function MainApp() {
         usersRef.current = next; setUsers(next);
         localStorage.setItem('sgm_users', JSON.stringify(next));
         localStorage.setItem('sgm_registration_account', JSON.stringify({ userId: user.id }));
+        localStorage.setItem(REGISTRATION_BROWSER_LOCK_KEY, JSON.stringify({ userId: String(user.id), at: Date.now() }));
         addLog('KULLANICI_KAYIT', 'Kurallar onaylandı. GM Özel Kod ve şifre üretildi; hesap sorumlu onayına kadar kısıtlı.', null, user.id);
       } else {
         addLog('KAYIT_BILGILERI_GOSTERILDI', 'Mevcut kayıt bilgileri yeniden gösterildi; yeni hesap oluşturulmadı.', null, user.id);
@@ -4764,8 +4816,16 @@ function MainApp() {
       sessionStorage.removeItem('sgm_registration_form_opened');
       setRegistrationFormOpened(false); setRegistrationRulesOpen(false); setShowRules(false);
     } catch (error) {
-      setRegistrationError(error.message);
-      addLog('KAYIT_HATA', 'Kullanıcı kaydı başlatılamadı: ' + error.message);
+      const knownGoogleError = {
+        'auth/credential-already-in-use':'Bu Google e-postası daha önce bir hesaba bağlanmış. Yeni kayıt oluşturmak yerine mevcut GM Özel Kodunuzla giriş yapın.',
+        'auth/account-exists-with-different-credential':'Bu Google e-postası farklı giriş yöntemiyle kayıtlı.',
+        'auth/popup-closed-by-user':'Google hesabı seçimi tamamlanmadı; tekrar deneyin.',
+        'auth/popup-blocked':'Tarayıcı Google giriş penceresini engelledi. Açılır pencerelere izin verin.',
+        'auth/operation-not-allowed':'Firebase Authentication ayarlarında Google giriş sağlayıcısını etkinleştirin.'
+      };
+      const explanation = knownGoogleError[error?.code] || error.message;
+      setRegistrationError(explanation);
+      addLog('KAYIT_HATA', 'Kullanıcı kaydı başlatılamadı: ' + explanation);
     } finally {
       registrationInFlightRef.current = false; setRegistrationBusy(false);
     }
@@ -4813,9 +4873,29 @@ function MainApp() {
   };
   const openRegistrationGoogleForm = async () => {
     if (registrationRedirectInFlightRef.current) return;
+    if (!registrationResult?.specialCode || !registrationResult?.pin) {
+      return showMessage('Kayıt Bulunamadı', 'Önce GM Özel Kod ve şifrenizi oluşturmalısınız.', 'warning');
+    }
+    if (registrationVerified) {
+      return showMessage('Form Zaten Gönderildi', 'Kayıt formunuz doğrulandı. Tekrar göndermenize gerek yok; mevcut hesabınızla giriş yapabilirsiniz.', 'warning');
+    }
     registrationRedirectInFlightRef.current = true;
     setRegistrationRedirectBusy(true);
     try {
+      // Sayfa yenilenmiş olabilir. Yönlendirmeden önce gerçek sunucu durumunu
+      // sorgula; yalnızca yerel tarayıcı işaretine güvenme.
+      const statusResponse = await fetch('/api/student-login', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({action:'form_status',specialCode:registrationResult.specialCode,pin:registrationResult.pin})
+      });
+      const status = await statusResponse.json().catch(()=>null);
+      if (!statusResponse.ok || status?.ok !== true) {
+        return showMessage('Form Kontrolü Yapılamadı', status?.message || 'Form durumunuz doğrulanamadı. Tekrar deneyin.', 'warning');
+      }
+      if (status.verified === true) {
+        setRegistrationVerified(true);
+        return showMessage('Form Zaten Doğrulandı', 'Bu GM Özel Kod için form zaten gönderilmiş. Yeni form açamazsınız; mevcut hesabınızla giriş yapabilirsiniz.', 'warning');
+      }
       const url = await refreshRegistrationFormUrl();
       if (!url) {
         return showMessage('Hesabınız Oluşturuldu', 'GM Özel Kod ve şifreniz hazır; hesabınız kısıtlı olarak korunuyor. Google Form bağlantısı bulunamadı. Kütüphane sorumlusundan YP → Kayıt / Google Form bölümündeki bağlantıyı kontrol etmesini isteyin.', 'warning');
@@ -4883,11 +4963,15 @@ function MainApp() {
       const response = await fetch('/api/student-login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ specialCode: rawPhone, pin: rawPin })
+        body: JSON.stringify({ specialCode: rawPhone, pin: rawPin,
+          deviceSecret:(() => {try{return getDeviceBindingSecret(true);}catch{return '';}})() })
       });
       const payload = await response.json().catch(() => null);
       if (response.status === 403 && payload?.error === 'form_not_verified') {
         return showMessage('Form Doğrulanmadı',payload.message,'warning');
+      }
+      if ([403,409].includes(response.status) && ['device_change_pending','device_key_missing','device_request_already_pending','device_already_registered'].includes(payload?.error)) {
+        return showMessage('Cihaz Onayı Gerekli', payload.message, 'warning');
       }
       if (response.status === 401 || response.status === 400) {
         addLog('OGRENCI_GIRIS_HATA', 'Başarısız öğrenci giriş denemesi.');
@@ -8159,7 +8243,7 @@ function MainApp() {
                   setRememberedLoginCode(''); setLoginIdentity('');
                 }} className="text-xs text-slate-500 underline">Bu cihazda hatırlanan GM kodunu kaldır</button>}
                 <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-blue-200">Giriş Yap <LogIn className="w-5 h-5" /></button>
-                <button type="button" onClick={()=>{setRegistrationAccepted(false);setRegistrationRulesOpen(true);setShowRules(true);}} className="w-full py-3 border border-blue-300 text-blue-700 rounded-xl font-bold">Kayıt Ol</button>
+                <button type="button" onClick={prepareNewStudentRegistration} className="w-full py-3 border border-blue-300 text-blue-700 rounded-xl font-bold">Kayıt Ol</button>
                 {registrationPending && registrationFormOpened && <p className="text-sm text-blue-700">Kayıt formuna <b>GM Özel Kodunuzu</b> yazmayı unutmayın. Form gönderimi doğrulanınca giriş açılacaktır.</p>}
                 {registrationError && <p role="alert" className="text-sm text-red-700">{registrationError}</p>}
                 {registrationResult && <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl space-y-3">
@@ -8172,7 +8256,8 @@ function MainApp() {
                   <p className="text-sm font-bold text-amber-900">Kayıt formuna GM özel kodunu yazmayı unutmayın.</p>
                   <button type="button" disabled={!registrationVerified} onClick={fillRegistrationLogin} className="w-full py-3 bg-blue-600 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-xl font-bold">{registrationVerified?'Sisteme Giriş Yap':'Form Doğrulanması Bekleniyor'}</button>
                   <button type="button" onClick={()=>checkRegistrationFormStatus(false)} className="w-full py-3 border border-blue-300 text-blue-700 rounded-xl font-bold">GM Özel Kodumu Kontrol Et</button>
-                  <button type="button" disabled={registrationRedirectBusy} onClick={openRegistrationGoogleForm} className="w-full py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold">{registrationRedirectBusy ? 'Google Form Açılıyor…' : 'Google Form’a Devam Et'}</button>
+                  {!registrationVerified ? <button type="button" disabled={registrationRedirectBusy} onClick={openRegistrationGoogleForm} className="w-full py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold">{registrationRedirectBusy ? 'Form Durumu Kontrol Ediliyor…' : registrationFormOpened ? 'Gönderilemediyse Formu Yeniden Aç' : 'Google Form’a Devam Et'}</button>
+                    : <p className="rounded-xl bg-green-50 p-3 text-sm font-bold text-green-800">Formunuz doğrulandı. Bu hesap için tekrar form açılmaz.</p>}
                   {registrationFormOpened && <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-800"><b>Son adım:</b> Google Formu tamamlayıp gönderin. Formdaki “GM Özel Kod” alanına <b>{registrationResult.specialCode}</b> kodunu girin. Formu gönderdikten sonra GM Özel Kodumu Kontrol Et butonuna basın. Doğrulanınca giriş açılır; lider ön onayı beklenmez.</div>}
                   <button type="button" onClick={()=>{sessionStorage.removeItem('sgm_registration_form_opened');sessionStorage.removeItem('sgm_registration_token');sessionStorage.removeItem('sgm_registration_credentials');sessionStorage.removeItem('sgm_registration_form_url');setRegistrationPending('');setRegistrationResult(null);setRegistrationFormUrl('');setRegistrationFormOpened(false);}} className="block font-bold text-slate-600">Bilgilerimi kaydettim, kapat</button>
                 </div>}
@@ -8228,7 +8313,7 @@ function MainApp() {
               )}
               {studentRestricted && <div className="p-4 bg-amber-50 border border-amber-200 text-amber-900 rounded-2xl"><b>Hesabınız kısıtlı.</b> Masa seçimi, boş masa ihbarı ve dilek / şikayet kapalıdır. {myUserObj?.formInfoRestrictionReason || myUserObj?.restrictionReason} Kütüphane sorumlusu gerekli kontrollerden sonra kısıtı kaldırabilir.<button onClick={refreshStudentProfile} className="block mt-2 px-3 py-2 bg-white border border-amber-300 rounded-lg font-bold">Hesap Durumunu Yenile</button></div>}
               {!studentRestricted && studentDeskWait > 0 && <div className="p-4 bg-blue-50 border border-blue-200 text-blue-900 rounded-2xl"><b>Yalnızca Masa {myUserObj?.deskReclaimDeskId} için kalan bekleme: {formatTime(studentDeskWait)}</b><p>Diğer uygun masaları hemen seçebilirsiniz. Yönetici istisna uygulayabilir.</p></div>}
-              {registrationResult && myUserObj?.pendingApproval && <div className="p-4 bg-white border rounded-2xl space-y-2"><p><b>GM özel kodunu yazmayı unutmayın:</b> {myUserObj.specialCode}</p><button disabled={registrationRedirectBusy} onClick={openRegistrationGoogleForm} className="p-3 bg-green-600 text-white rounded-xl">Kayıt formunu aç</button></div>}
+              {registrationResult && myUserObj?.pendingApproval && myUserObj?.registrationFormStatus !== 'verified' && <div className="p-4 bg-white border rounded-2xl space-y-2"><p><b>GM özel kodunu yazmayı unutmayın:</b> {myUserObj.specialCode}</p><button disabled={registrationRedirectBusy} onClick={openRegistrationGoogleForm} className="p-3 bg-green-600 text-white rounded-xl">Kayıt formunu aç</button></div>}
               <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden relative">
                 <div className={`h-2 w-full ${!myDesk ? 'bg-slate-300' : myIsOnBreak ? 'bg-yellow-400' : myIsReported ? 'bg-red-500' : 'bg-green-500'}`} />
                 

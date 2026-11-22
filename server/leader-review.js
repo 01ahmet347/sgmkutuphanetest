@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { dataCollection } from './firebase-admin.js';
 import { releaseUserFromDesk } from '../src/sync-core.js';
 import { isFormGatePending } from './form-status.js';
+import { pendingDeviceChangeRequests } from './device-binding.js';
 const fail=(message,status=400)=>Object.assign(new Error(message),{status});
 const validUserId=value=>typeof value==='string' && value.length>0 && value.length<=180 && !value.includes('/');
 export function publicReviewUser(id,user) {
@@ -16,12 +17,17 @@ export function publicReviewUser(id,user) {
     accessRestricted: user.blocked===true || user.pendingApproval===true || Number(user.restrictedUntil||0)>Date.now()};
 }
 export async function leaderQueue({collection=dataCollection}) {
-  const [users,config,leaderConfig] = await Promise.all([
+  const [users,config,leaderConfig,deviceRequests] = await Promise.all([
     collection('sgmUsers').orderBy('createdAt','desc').limit(150).get(),
     collection('sgmConfig').doc('settings').get(),
-    collection('sgmLeaderConfig').doc('forms').get()
+    collection('sgmLeaderConfig').doc('forms').get(),
+    pendingDeviceChangeRequests({collection})
   ]);
   return {students:users.docs.filter(doc=>doc.data().formGateEnabled===true).map(doc=>publicReviewUser(doc.id,doc.data())),
+    deviceRequests:deviceRequests.map(request => {
+      const user=users.docs.find(doc => doc.id===request.userId)?.data();
+      return {...request,studentName:user?.name || 'Öğrenci',specialCode:user?.specialCode || ''};
+    }),
     formUrl:config.data()?.registrationFormUrl||'', codeListUrl:leaderConfig.data()?.gmCodeListUrl||''};
 }
 export async function leaderHistory({leaderId,collection=dataCollection}) {

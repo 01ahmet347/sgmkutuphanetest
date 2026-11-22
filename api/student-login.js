@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { getAuth } from 'firebase-admin/auth';
 import { adminApp, dataCollection } from '../server/firebase-admin.js';
 import { createStudentLoginHandler } from '../server/student-auth.js';
+import { authorizeStudentDevice } from '../server/device-binding.js';
 
 const attemptRef = (req, specialCode, mode='login') => {
   const clientAddress = req.headers?.['x-vercel-forwarded-for'] ||
@@ -22,6 +23,9 @@ const handler = createStudentLoginHandler({
       const deleted = await dataCollection('sgmDeletedUsers').doc(snapshot.id).get();
       return { id: snapshot.id, user: snapshot.data(), deleted: deleted.exists };
     }));
+  },
+  authorizeDevice(uid, deviceSecret) {
+    return authorizeStudentDevice({uid, deviceSecret});
   },
   createCustomToken(uid, claims) {
     return getAuth(adminApp()).createCustomToken(uid, claims);

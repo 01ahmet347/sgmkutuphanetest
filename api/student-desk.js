@@ -2,12 +2,14 @@ import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { adminApp, dataCollection } from '../server/firebase-admin.js';
 import { createStudentDeskHandler, getIstanbulDayKey } from '../server/student-desk.js';
+import { verifyDeviceForAction } from '../server/device-binding.js';
 import { createCloudActions } from '../src/cloud-transactions.js';
 import { outsideLibraryHours } from '../server/daily-close.js';
 import { violationPolicyPatch } from '../src/restriction-policy.js';
 import { releaseExpiredBreaksForDesk } from '../server/break-auto-release.js';
 
 const handler = createStudentDeskHandler({
+  authorizeDevice: verifyDeviceForAction,
   autoReleaseBreak: deskId => releaseExpiredBreaksForDesk({ deskId, collection: dataCollection }),
   async authenticateStudent(req) {
     const token = /^Bearer\s+(.+)$/i.exec(

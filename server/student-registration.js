@@ -11,13 +11,13 @@ export function createStudentRegistrationHandler({ verifyAnonymousUser, isRateLi
       const uid = await verifyAnonymousUser(req);
       if (!uid) return res.status(401).json({
         ok: false, error: 'anonymous_session_required',
-        message: 'Kayıt için anonim cihaz oturumu doğrulanamadı. Kayıt ekranından yeniden deneyin.'
+        message: 'Kayıt oturumu doğrulanamadı. Kayıt ekranından yeniden deneyin.'
       });
       if (await isRateLimited?.(req)) return res.status(429).json({
         ok: false, error: 'too_many_attempts',
         message: 'Kısa sürede çok fazla kayıt denemesi yapıldı. Daha sonra tekrar deneyin.'
       });
-      const created = await createStudent(uid);
+      const created = await createStudent(uid, req);
       return res.status(201).json({ok: true, user: created.user, credentials: created.credentials});
     } catch (error) {
       if (error.status) return res.status(error.status).json({ok: false, error: error.code, ...(error.publicMessage ? {message: error.publicMessage} : {})});
@@ -30,7 +30,7 @@ export function createStudentRegistrationHandler({ verifyAnonymousUser, isRateLi
   };
 }
 
-export function createStudentRecord({uid, specialCode, pin, settings, now = Date.now()}) {
+export function createStudentRecord({uid, specialCode, pin, settings, now = Date.now(), security = null}) {
   const registrationSession = randomUUID();
   return {
     id: uid, name: `Yeni Kayıt • ${specialCode}`, identityNo: specialCode, specialCode, pin,
@@ -38,7 +38,13 @@ export function createStudentRecord({uid, specialCode, pin, settings, now = Date
     restrictedUntil: 0, restrictionReason: 'Google Form gönderimi ve GM Özel Kod doğrulaması bekleniyor',
     activeDeskId: null, activeDeskRole: null, pendingDeskId: null, pendingDeskDeadline: null,
     breaks: {short: Number(settings.shortBreakCount) || 5, long: Number(settings.longBreakCount) || 2},
-    strikes: 0, blocked: false, canReport: true, createdAt: now
+    strikes: 0, blocked: false, canReport: true, createdAt: now,
+    // Sadece yeni güvenli kayıtlar. Eski kayıtları migration olmadan değiştirmeyin.
+    // E-posta modu kapalıyken de yeni hesap aynı tarayıcı anahtarına kilitlenir.
+    // v1 kilidi sadece ikinci KAYDI önler; eski giriş/masa yetkilendirmesini değiştirmez.
+    ...(security?.emailHash ? {registrationSecurityVersion:2,registrationEmail:security.email,
+      registrationEmailHash:security.emailHash,deviceBindingHash:security.deviceHash}
+      : security?.deviceHash ? {registrationDeviceGuardVersion:1,deviceBindingHash:security.deviceHash} : {})
   };
 }
 export function generateStudentCredential() { return String(randomInt(10_000_000, 100_000_000)); }

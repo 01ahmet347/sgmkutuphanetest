@@ -25,6 +25,9 @@ service cloud.firestore {
     match /artifacts/{appId}/public/data/sgmLeaderAudit/{id} { allow read, write: if false; }
     match /artifacts/{appId}/public/data/sgmLeaderConfig/{id} { allow read, write: if false; }
     match /artifacts/{appId}/public/data/sgmFormSubmissions/{id} { allow read, write: if false; }
+    match /artifacts/{appId}/public/data/sgmEmailBindings/{id} { allow read, write: if false; }
+    match /artifacts/{appId}/public/data/sgmDeviceBindings/{id} { allow read, write: if false; }
+    match /artifacts/{appId}/public/data/sgmDeviceChangeRequests/{id} { allow read, write: if false; }
     match /artifacts/{appId}/public/data/sgmLeaderLoginAttempts/{id} { allow read, write: if false; }
 
     match /artifacts/{appId}/public/data/sgmConfig/{documentId} {
@@ -66,7 +69,9 @@ service cloud.firestore {
         'reportPermissionRestoredAt', 'restrictionClearedAt',
         'formGateEnabled', 'registrationFormStatus', 'formVerifiedAt', 'formInfoRestricted',
         'formInfoRestrictionReason', 'formInfoRestrictionAt', 'formInfoRestrictionBy',
-        'leaderReviewStatus', 'leaderReviewedBy', 'leaderReviewedAt'
+        'leaderReviewStatus', 'leaderReviewedBy', 'leaderReviewedAt',
+        'registrationSecurityVersion', 'registrationEmail', 'registrationEmailHash',
+        'deviceBindingHash', 'deviceChangedAt', 'deviceChangedBy'
       ]);
     }
 
@@ -98,6 +103,7 @@ service cloud.firestore {
       return bucket in [
         'sgmLeaders', 'sgmLeaderAudit', 'sgmLeaderConfig',
         'sgmFormSubmissions', 'sgmLeaderLoginAttempts',
+        'sgmEmailBindings', 'sgmDeviceBindings', 'sgmDeviceChangeRequests',
         'sgmUsers', 'sgmDesks', 'sgmMessages', 'sgmConfig', 'sgmAdminSessions'
       ];
     }

@@ -11,7 +11,7 @@ const getIstanbulDayKey = (date = new Date()) => {
   return `${values.year}-${values.month}-${values.day}`;
 };
 
-export function createStudentDeskHandler({ authenticateStudent, createActions, autoReleaseBreak }) {
+export function createStudentDeskHandler({ authenticateStudent, authorizeDevice, createActions, autoReleaseBreak }) {
   return async function studentDeskHandler(req, res) {
     res.setHeader('Cache-Control', 'no-store');
     if (req.method !== 'POST') {
@@ -22,6 +22,11 @@ export function createStudentDeskHandler({ authenticateStudent, createActions, a
     try {
       const uid = await authenticateStudent(req);
       if (!uid) return res.status(401).json({ ok: false, error: 'unauthenticated' });
+      // Yeni güvenli hesapların eski cihazdan gelen geçerli tokenları da masa işlemi yapamaz.
+      if (authorizeDevice && !(await authorizeDevice(uid, req.body?.deviceSecret))) {
+        return res.status(403).json({ok:false,error:'device_not_authorized',
+          message:'Bu cihaz hesabınıza bağlı değil. Gençlik liderinden cihaz değişikliği onayı alın.'});
+      }
 
       const { action, deskId, deviceId, qrCode, type, targetUserId, requestId } = req.body || {};
       if (!['reserve', 'claim', 'cancel', 'expire', 'break-start', 'break-end', 'break-repair', 'report', 'verify', 'leave'].includes(action) ||

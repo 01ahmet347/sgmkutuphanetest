@@ -1,6 +1,8 @@
 import { verifyFormSignature } from '../server/form-signature.js';
 import { acceptFormSubmission } from '../server/form-verification.js';
 import { createHash } from 'node:crypto';
+import { guardIsEnabled, validateNewRegistrationIdentity, validateNewRegistrationDevice,
+  registrationFailure } from '../server/registration-security.js';
 import { getAuth } from 'firebase-admin/auth';
 import { adminApp, dataCollection } from '../server/firebase-admin.js';
 import {
@@ -40,17 +42,21 @@ function registrationDiagnostic(stage, action) {
 }
 
 // Kimlik yalnızca doğrulanmış token'dan alınır; istemci userId seçemez.
-const anonymousUidKey = Symbol('verifiedAnonymousRegistrationUid');
+const anonymousUidKey = Symbol('verifiedRegistrationIdentity');
 async function verifyAnonymousUser(req) {
   if (Object.prototype.hasOwnProperty.call(req, anonymousUidKey)) {
-    return req[anonymousUidKey];
+    return req[anonymousUidKey]?.uid || null;
   }
   const token = /^Bearer\s+(.+)$/i.exec(req.headers?.authorization || '')?.[1];
   if (!token) return null;
   const decoded = await getAuth(adminApp()).verifyIdToken(token);
-  const uid = decoded.firebase?.sign_in_provider === 'anonymous' ? decoded.uid : null;
-  req[anonymousUidKey] = uid;
-  return uid;
+  const provider = decoded.firebase?.sign_in_provider;
+  const validProvider = provider === 'anonymous' ||
+    (provider === 'google.com' && decoded.email_verified === true && typeof decoded.email === 'string');
+  const identity = validProvider ? {uid:decoded.uid, provider, email:decoded.email || '',
+    emailVerified:decoded.email_verified === true} : null;
+  req[anonymousUidKey] = identity;
+  return identity?.uid || null;
 }
 
 function registrationResult(user, uid) {
@@ -108,16 +114,26 @@ const handler = createStudentRegistrationHandler({
     });
   }),
 
-  createStudent: registrationDiagnostic('hesap_olusturma', async uid => {
+  createStudent: registrationDiagnostic('hesap_olusturma', async (uid, req) => {
     const authCodes = dataCollection('sgmAuthCodes');
     const users = dataCollection('sgmUsers');
     const config = await dataCollection('sgmConfig').doc('settings').get();
     const settings = config.data() || {};
+    // Guard sadece yeni hesaplara uygulanır; mevcut UID belgesi ilk olarak transaction'da kontrol edilir.
+    const guard = guardIsEnabled();
+    const existing = await users.doc(uid).get();
+    // Her YENİ kayıt benzersiz tarayıcı anahtarı ister. Google/e-posta şartı ise
+    // yalnızca iki güvenlik bayrağı etkinse yeni kayda uygulanır.
+    // Eski UID için hiçbir yeni güvenlik alanı zorunlu değildir.
+    const security = existing.exists ? null : (
+      guard ? validateNewRegistrationIdentity(req[anonymousUidKey], req.body?.deviceSecret)
+        : validateNewRegistrationDevice(req.body?.deviceSecret)
+    );
 
     for (let attempt = 0; attempt < 12; attempt++) {
       const specialCode = generateStudentCredential();
       const pin = generateStudentCredential();
-      const user = createStudentRecord({ uid, specialCode, pin, settings });
+      const user = createStudentRecord({ uid, specialCode, pin, settings, security });
 
       const result = await users.firestore.runTransaction(async tx => {
         const userRef = users.doc(uid);
@@ -139,11 +155,26 @@ const handler = createStudentRegistrationHandler({
           return existingResult;
         }
 
+        // İlk okumanın ardından hesap yarışla oluşmuş olabilir: eski kayıt olarak döndür.
+        // Yeni kayıt için hem e-posta hem tarayıcı anahtarı transaction içinde benzersizdir.
+        if (!security) {
+          throw registrationFailure('device_key_required', 'Yeni kayıt için cihaz anahtarı zorunludur.', 400);
+        }
         const codeRef = authCodes.doc(specialCode);
-        const codeSnap = await tx.get(codeRef);
+        const emailRef = security.emailHash ? dataCollection('sgmEmailBindings').doc(security.emailHash) : null;
+        const deviceRef = dataCollection('sgmDeviceBindings').doc(security.deviceHash);
+        const [codeSnap, emailSnap, deviceSnap] = await Promise.all([
+          tx.get(codeRef),emailRef ? tx.get(emailRef) : null,tx.get(deviceRef)
+        ]);
         if (codeSnap.exists) return null;
+        if (emailRef && emailSnap.exists) throw registrationFailure('email_already_registered',
+          'Bu e-posta ile kayıtlı bir hesap var. Yeni hesap açmak yerine mevcut GM Özel Kodunuzla giriş yapın.',409);
+        if (deviceSnap.exists) throw registrationFailure('device_already_registered',
+          'Bu tarayıcıda zaten bir GM Özel Kod oluşturuldu. İkinci hesap açamazsınız; mevcut kodunuz ve şifrenizle giriş yapın.',409);
         const newResult = registrationResult(user, uid);
         tx.create(codeRef, { userId: uid, createdAt: Date.now() });
+        if (emailRef) tx.create(emailRef, {userId:uid,createdAt:Date.now()});
+        tx.create(deviceRef, {userId:uid,createdAt:Date.now()});
         tx.create(userRef, user);
         return newResult;
       });
@@ -157,14 +188,14 @@ const handler = createStudentRegistrationHandler({
 export default async function registrationWithFormWebhook(req,res) {
   if(req.method === 'POST' && req.body?.action === 'form_webhook') {
     res.setHeader('Cache-Control','no-store');
-    const {specialCode,submissionId,timestamp} = req.body || {};
+    const {specialCode,submissionId,timestamp,email} = req.body || {};
     const signature = req.headers?.['x-sgm-form-signature'];
     const secret = process.env.SGM_FORM_WEBHOOK_SECRET;
-    if (!verifyFormSignature({secret,timestamp,code:specialCode,submissionId,signature})) {
+    if (!verifyFormSignature({secret,timestamp,code:specialCode,submissionId,email,signature})) {
       return res.status(401).json({ok:false,error:'invalid_form_signature'});
     }
     try {
-      const result=await acceptFormSubmission({code:specialCode,submissionId});
+      const result=await acceptFormSubmission({code:specialCode,submissionId,email});
       return res.status(200).json({ok:true,...result});
     } catch(error) {
       if (!error.status) console.error('Form webhook error:',error.code||error.message);

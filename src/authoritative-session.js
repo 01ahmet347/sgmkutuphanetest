@@ -42,7 +42,9 @@ export const ACCOUNT_PERMISSION_FIELDS = Object.freeze([
   'canReport', 'reportPermissionPolicyVersion', 'reportPermissionRestrictionUntil',
   'restrictionClearedAt', 'formGateEnabled', 'registrationFormStatus', 'formVerifiedAt',
   'formInfoRestricted', 'formInfoRestrictionReason', 'formInfoRestrictionAt',
-  'formInfoRestrictionBy', 'leaderReviewStatus', 'leaderReviewedAt', 'leaderReviewedBy'
+  'formInfoRestrictionBy', 'leaderReviewStatus', 'leaderReviewedAt', 'leaderReviewedBy',
+  'registrationSecurityVersion', 'registrationEmail', 'registrationEmailHash',
+  'deviceBindingHash', 'deviceChangedAt', 'deviceChangedBy'
 ]);
 export function withoutAccountApprovalWrites(row) {
   const clean = { ...row };

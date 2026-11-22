@@ -45,7 +45,7 @@ async function leaderRequest(auth,action,params={}) {
 }
 
 export function LeaderDashboard({auth,leader,onExit}) {
-  const [queue,setQueue]=useState([]),[history,setHistory]=useState([]);
+  const [queue,setQueue]=useState([]),[history,setHistory]=useState([]),[deviceRequests,setDeviceRequests]=useState([]);
   const [links,setLinks]=useState({});
   const [filter,setFilter]=useState(''),[selected,setSelected]=useState(null);
   const [reason,setReason]=useState(''),[confirmed,setConfirmed]=useState(false);
@@ -54,7 +54,7 @@ export function LeaderDashboard({auth,leader,onExit}) {
     setBusy(true);setError('');
     try {
       const [result,log]=await Promise.all([leaderRequest(auth,'leader_queue'),leaderRequest(auth,'leader_history')]);
-      setQueue(result.students||[]);setLinks(result);setHistory(log.history||[]);
+      setQueue(result.students||[]);setDeviceRequests(result.deviceRequests||[]);setLinks(result);setHistory(log.history||[]);
       if(selected) setSelected((result.students||[]).find(x=>x.id===selected.id)||null);
     } catch(e){setError(e.message);} finally{setBusy(false);}
   };
@@ -84,6 +84,24 @@ export function LeaderDashboard({auth,leader,onExit}) {
         {links.formUrl ? <a className="text-blue-700 underline inline-flex gap-1 items-center" href={links.formUrl} target="_blank" rel="noopener noreferrer"><ExternalLink size={16}/> Ana Google Form</a>:<span className="text-amber-700">Ana form ayarlanmamış</span>}
         {links.codeListUrl ? <a className="text-blue-700 underline inline-flex gap-1 items-center" href={links.codeListUrl} target="_blank" rel="noopener noreferrer"><ExternalLink size={16}/> GM Özel Kod Listesi</a>:<span className="text-amber-700">Kod listesi ayarlanmamış</span>}
         <p className="w-full text-xs text-slate-500">Google belgelerine erişim, ilgili Google hesabına ayrıca verilmiş izinlere bağlıdır.</p>
+      </section>
+      <section className="bg-white border rounded-2xl p-4 space-y-3">
+        <h2 className="font-black text-lg flex gap-2 items-center"><Lock size={19}/> Cihaz Değişikliği Talepleri</h2>
+        <p className="text-sm text-slate-600">Yalnızca öğrencinin kimliğini yüz yüze doğruladıktan sonra onaylayın. Eski hesabın kodu, şifresi ve masası değişmez. Yeni cihaz ancak onaylanan talep için giriş yapabilir.</p>
+        {deviceRequests.map(request=><div key={request.requestId} className="border rounded-xl p-3 flex flex-wrap gap-3 items-center justify-between">
+          <div><p className="font-semibold">{request.studentName} · GM: {request.specialCode || '—'}</p><p className="text-xs text-slate-500">Talep: {dateTime(request.requestedAt)}</p></div>
+          <div className="flex gap-2">
+            <button type="button" className={`${btn} bg-green-600 text-white`} disabled={busy} onClick={async()=>{
+              if(!window.confirm('Öğrencinin kimliğini yüz yüze doğruladınız mı? Bu cihaz değişikliğini onaylamak istiyor musunuz?'))return;
+              setBusy(true);setError('');try {await leaderRequest(auth,'leader_device_approve',{userId:request.userId,requestId:request.requestId});setNotice('Onaylandı. Öğrenci yeni cihazından aynı kod ve şifreyle giriş yapabilir.');await load();}catch(e){setError(e.message);}finally{setBusy(false);}
+            }}>Onayla</button>
+            <button type="button" className={`${btn} bg-red-100 text-red-700`} disabled={busy} onClick={async()=>{
+              if(!window.confirm('Bu cihaz değişikliği talebi reddedilsin mi?'))return;
+              setBusy(true);setError('');try{await leaderRequest(auth,'leader_device_reject',{userId:request.userId,requestId:request.requestId});setNotice('Cihaz talebi reddedildi.');await load();}catch(e){setError(e.message);}finally{setBusy(false);}
+            }}>Reddet</button>
+          </div>
+        </div>)}
+        {!deviceRequests.length && <p className="text-sm text-slate-500">Bekleyen cihaz değişikliği talebi yok.</p>}
       </section>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <Metric label="İncelenecek" number={queue.filter(u=>u.formVerified && u.reviewStatus==='pending').length}/>

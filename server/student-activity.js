@@ -20,7 +20,7 @@ const STUDENT_EVENT_PREFIXES = [
   'UYGULAMA_'
 ];
 
-export function createStudentActivityHandler({ authenticateStudent, saveFeedback, savePushToken, saveAuditEvent, saveBreakExpiryEvent, autoReleaseBreak }) {
+export function createStudentActivityHandler({ authenticateStudent, authorizeDevice, saveFeedback, savePushToken, saveAuditEvent, saveBreakExpiryEvent, autoReleaseBreak }) {
   return async function studentActivityHandler(req, res) {
     res.setHeader('Cache-Control', 'no-store');
     if (req.method !== 'POST') {
@@ -31,6 +31,10 @@ export function createStudentActivityHandler({ authenticateStudent, saveFeedback
     try {
       const uid = await authenticateStudent(req);
       if (!uid) return res.status(401).json({ ok: false, error: 'unauthenticated' });
+      if (authorizeDevice && !(await authorizeDevice(uid, req.body?.deviceSecret))) {
+        return res.status(403).json({ok:false,error:'device_not_authorized',
+          message:'Bu cihaz hesabınıza bağlı değil. Gençlik liderinden onay alın.'});
+      }
       const body = req.body || {};
       let result;
 

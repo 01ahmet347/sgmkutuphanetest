@@ -6,7 +6,7 @@ const equalSecret = (provided, stored) => timingSafeEqual(
   createHash('sha256').update(String(stored)).digest()
 );
 
-export function createStudentLoginHandler({ findBySpecialCode, createCustomToken, isRateLimited, clearAttempts }) {
+export function createStudentLoginHandler({ findBySpecialCode, createCustomToken, isRateLimited, clearAttempts, authorizeDevice }) {
   return async function studentLoginHandler(req, res) {
     res.setHeader('Cache-Control', 'no-store');
     if (req.method !== 'POST') {
@@ -39,6 +39,8 @@ export function createStudentLoginHandler({ findBySpecialCode, createCustomToken
         return res.status(403).json({ok:false,error:'form_not_verified',
           message:'Google Form gönderiminiz henüz doğrulanmadı. Formu gönderip GM Özel Kod kontrolünü yeniden deneyin.'});
       }
+      // Yalnızca yeni güvenli kayıtlar için cihaz eşleştirmesi / lider onayı kontrolü.
+      await authorizeDevice?.(id, req.body?.deviceSecret, user);
       // Başarılı giriş, sayaç silme problemi nedeniyle reddedilemez.
       try { await clearAttempts?.(req, specialCode); }
       catch (error) { console.warn('Login attempt cleanup deferred:', error?.code || 'unavailable'); }
@@ -46,6 +48,8 @@ export function createStudentLoginHandler({ findBySpecialCode, createCustomToken
       const { pin: _pin, pushTokens: _pushTokens, ...profile } = user;
       return res.status(200).json({ ok: true, token, user: { ...profile, id } });
     } catch (error) {
+      if (error.status) return res.status(error.status).json({ok:false,error:error.code || 'device_not_authorized',
+        message:error.publicMessage || error.message});
       console.error('Student login error:', error.code || 'unknown');
       return res.status(503).json({
         ok: false,

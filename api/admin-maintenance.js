@@ -8,12 +8,13 @@ import { violationPolicyPatch } from '../src/restriction-policy.js';
 import { updateSystemSettings } from '../server/settings-update.js';
 import { requireLeader, manageLeader } from '../server/leader-auth.js';
 import { leaderQueue, leaderHistory, adminLeaderHistory, reviewStudent, saveLeaderFormLinks } from '../server/leader-review.js';
+import { decideDeviceChange } from '../server/device-binding.js';
 
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
   if (req.method !== 'POST') return res.status(405).json({ ok: false });
   const { action, userId, userIds, deskId, patch, expectedPermission } = req.body || {};
-  const newActions = ['admin_leader_list','admin_leader_create','admin_leader_password','admin_leader_status','admin_leader_history','admin_leader_config','admin_leader_links','leader_queue','leader_history','leader_check','leader_restrict','leader_unrestrict'];
+  const newActions = ['admin_leader_list','admin_leader_create','admin_leader_password','admin_leader_status','admin_leader_history','admin_leader_config','admin_leader_links','leader_queue','leader_history','leader_check','leader_restrict','leader_unrestrict','leader_device_approve','leader_device_reject'];
   if (newActions.includes(action)) return handleNewAction(req, res, action);
   if (!['delete_user', 'expire', 'approve_user', 'approve_users', 'update_user', 'restore_report_permission','update_settings','close_history'].includes(action) ||
       action === 'approve_user' && !validApprovalIds([userId]) ||
@@ -106,6 +107,10 @@ async function handleNewAction(req,res,action) {
     let result;
     if(action==='leader_queue') result=await leaderQueue({});
     else if(action==='leader_history') result=await leaderHistory({leaderId:leader.username});
+    else if(['leader_device_approve','leader_device_reject'].includes(action)) {
+      result=await decideDeviceChange({userId:input.userId,requestId:input.requestId,
+        approve:action==='leader_device_approve',leader});
+    }
     else if(['leader_check','leader_restrict','leader_unrestrict'].includes(action)) {
       result=await reviewStudent({action,userId:input.userId,reason:input.reason,leader});
     } else if(action==='admin_leader_history') result=await adminLeaderHistory({});
