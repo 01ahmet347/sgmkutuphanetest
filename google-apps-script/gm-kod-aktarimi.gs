@@ -22,6 +22,8 @@ function transferSubmission_(formResponse) {
   const answer=formResponse.getItemResponses().find(item=>item.getItem().getTitle().trim()===formTitle);
   const code=String(answer ? answer.getResponse() : '').trim();
   if (!/^\d{8}$/.test(code)) throw new Error('Yanıtta geçerli GM Özel Kod bulunamadı.');
+  // Form ayarları: 'Doğrulanmış e-posta adreslerini topla' etkin olmalı.
+  const email=String(formResponse.getRespondentEmail() || '').trim().toLowerCase();
   const submissionId=formResponse.getId();
   if (!/^[A-Za-z0-9_-]{8,160}$/.test(submissionId)) throw new Error('Google yanıt kimliği doğrulanamadı.');
   const sheetId=props.getProperty('GM_CODES_SPREADSHEET_ID');
@@ -40,8 +42,8 @@ function transferSubmission_(formResponse) {
     const existing=sheet.getLastRow()>1 ? sheet.getRange(2,3,sheet.getLastRow()-1,1).getValues().flat() : [];
     if (existing.includes(submissionId)) return;
     const timestamp=Date.now();
-    const payload={action:'form_webhook',specialCode:code,submissionId,timestamp};
-    const bytes=Utilities.computeHmacSha256Signature(`${timestamp}:${code}:${submissionId}`,secret);
+    const payload={action:'form_webhook',specialCode:code,submissionId,timestamp,email};
+    const bytes=Utilities.computeHmacSha256Signature((email ? `${timestamp}:${code}:${submissionId}:${email}` : `${timestamp}:${code}:${submissionId}`),secret);
     const signature=bytes.map(byte=>('0'+(byte&255).toString(16)).slice(-2)).join('');
     const res=UrlFetchApp.fetch(appUrl.replace(/\/$/,'')+'/api/student-register',{
       method:'post',contentType:'application/json',
@@ -50,6 +52,8 @@ function transferSubmission_(formResponse) {
     });
     const status=res.getResponseCode();
     if (status!==200) throw new Error('SGM API form doğrulaması başarısız: HTTP '+status+' '+res.getContentText().slice(0,150));
+    const verification=JSON.parse(res.getContentText() || '{}');
+    if (verification.duplicate === true) return; // Yeni v2 hesabın 2. gönderimini yazma.
     const nextRow=sheet.getLastRow()+1;
     sheet.getRange(nextRow,1).setNumberFormat('@'); // 0 ile başlayan kodu koru.
     sheet.getRange(nextRow,1,1,3).setValues([[code,new Date(),submissionId]]);
